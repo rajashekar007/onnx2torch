@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ONNX models (can be large)
+*.onnx
+
+# PyTorch models
+*.pt
+*.pth
+
+# Numpy data
+*.npy
+*.npz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+sow.md
