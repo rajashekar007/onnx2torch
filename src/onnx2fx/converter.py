@@ -108,6 +108,120 @@ for version in [5, 13, 14, 19]:
     _CONVERTER_REGISTRY[description] = _reshape_converter_allowzero
 
 
+# ── GridSample converter (not in onnx2torch) ────────────────────────────────
+class OnnxGridSample(nn.Module):
+    """PyTorch module wrapping torch.nn.functional.grid_sample.
+
+    Maps ONNX GridSample (opset 16+) attributes to the PyTorch API.
+    """
+
+    def __init__(self, mode: str = "bilinear", padding_mode: str = "zeros", align_corners: bool = False):
+        super().__init__()
+        self.mode = mode
+        self.padding_mode = padding_mode
+        self.align_corners = align_corners
+
+    def forward(self, input_tensor: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.grid_sample(
+            input_tensor, grid,
+            mode=self.mode,
+            padding_mode=self.padding_mode,
+            align_corners=self.align_corners,
+        )
+
+
+def _grid_sample_converter(node: OnnxNode, graph: OnnxGraph) -> OperationConverterResult:
+    attrs = node.attributes
+    mode = attrs.get("mode", "bilinear")
+    if isinstance(mode, bytes):
+        mode = mode.decode("utf-8")
+    padding_mode = attrs.get("padding_mode", "zeros")
+    if isinstance(padding_mode, bytes):
+        padding_mode = padding_mode.decode("utf-8")
+    align_corners = bool(attrs.get("align_corners", 0))
+
+    from onnx2torch.utils.common import OnnxMapping
+
+    return OperationConverterResult(
+        torch_module=OnnxGridSample(mode=mode, padding_mode=padding_mode, align_corners=align_corners),
+        onnx_mapping=OnnxMapping(
+            inputs=tuple(node.input_values[:2]),
+            outputs=tuple(node.output_values),
+        ),
+    )
+
+
+for _v in [16, 20]:
+    try:
+        add_converter(operation_type="GridSample", version=_v)(_grid_sample_converter)
+    except ValueError:
+        pass  # Already registered
+
+
+# ── Clip converter fix (onnx2torch crashes on empty-string min/max) ──────────
+class _OnnxClipFixed(nn.Module):
+    """torch.clamp wrapper that handles None min/max."""
+
+    def __init__(self, min_val=None, max_val=None):
+        super().__init__()
+        self.min_val = min_val
+        self.max_val = max_val
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.clamp(x, self.min_val, self.max_val)
+
+
+def _clip_converter_fixed(node: OnnxNode, graph: OnnxGraph) -> OperationConverterResult:
+    """Handle Clip with optional/empty min and max inputs."""
+    min_name = node.input_values[1] if len(node.input_values) > 1 else None
+    max_name = node.input_values[2] if len(node.input_values) > 2 else None
+
+    # Treat empty strings as "no bound"
+    if min_name == "":
+        min_name = None
+    if max_name == "":
+        max_name = None
+
+    min_val = None
+    max_val = None
+
+    if min_name is not None:
+        try:
+            min_val = float(get_const_value(min_name, graph))
+        except (KeyError, TypeError):
+            pass
+    if max_name is not None:
+        try:
+            max_val = float(get_const_value(max_name, graph))
+        except (KeyError, TypeError):
+            pass
+
+    # Optimize common patterns
+    if min_val == 0 and max_val is None:
+        torch_module = nn.ReLU()
+    elif min_val == 0 and max_val == 6:
+        torch_module = nn.ReLU6()
+    elif min_val is None and max_val is None:
+        torch_module = nn.Identity()
+    else:
+        torch_module = _OnnxClipFixed(min_val=min_val, max_val=max_val)
+
+    from onnx2torch.utils.common import OnnxMapping
+
+    return OperationConverterResult(
+        torch_module=torch_module,
+        onnx_mapping=OnnxMapping(
+            inputs=(node.input_values[0],),
+            outputs=tuple(node.output_values),
+        ),
+    )
+
+
+for _v in [11, 12, 13]:
+    desc = OperationDescription(domain="", operation_type="Clip", version=_v)
+    _CONVERTER_REGISTRY[desc] = _clip_converter_fixed
+
+
 class ConversionError(Exception):
     """Raised when ONNX to PyTorch conversion fails."""
     pass
@@ -292,11 +406,17 @@ class OnnxToFxConverter:
         """Verify the converted model is FX-traceable."""
         if self._pytorch_model is None:
             raise RuntimeError("Must call convert() first")
-            
+        
         logger.info("Verifying FX traceability...")
         try:
-            # Try symbolic trace
-            self._fx_graph = torch.fx.symbolic_trace(self._pytorch_model)
+            from .fx_tracer import Onnx2TorchTracer
+
+            # Use Onnx2TorchTracer which treats onnx2torch custom modules
+            # as leaf nodes to avoid tracing into their control-flow-heavy
+            # forward() methods.
+            tracer = Onnx2TorchTracer(self._pytorch_model)
+            graph = tracer.trace(self._pytorch_model)
+            self._fx_graph = torch.fx.GraphModule(self._pytorch_model, graph)
             logger.info("FX symbolic trace successful")
             
             # Validate graph structure

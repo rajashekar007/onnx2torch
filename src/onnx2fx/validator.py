@@ -70,6 +70,7 @@ def compare_outputs(
     onnx_output: np.ndarray,
     torch_output: np.ndarray,
     tolerance: float = 1.0,
+    atol: float | None = None,
 ) -> AccuracyMetrics:
     """
     Compare outputs from ONNX and PyTorch models.
@@ -78,6 +79,10 @@ def compare_outputs(
         onnx_output: Output array from ONNX Runtime.
         torch_output: Output array from PyTorch model.
         tolerance: Maximum allowed relative error (percentage).
+        atol: Optional absolute tolerance.  If given, validation passes
+            when *either* relative_error <= tolerance OR max_diff <= atol.
+            This is useful for detection models whose outputs are mostly
+            near-zero, inflating relative error.
         
     Returns:
         AccuracyMetrics with comparison results.
@@ -107,7 +112,11 @@ def compare_outputs(
     else:
         relative_error = 0.0 if mean_diff < 1e-8 else 100.0
     
+    # Pass if relative error is within tolerance, OR if the absolute
+    # error is within atol (useful for outputs dominated by near-zero values).
     passed = relative_error <= tolerance
+    if not passed and atol is not None:
+        passed = max_diff <= atol
     
     return AccuracyMetrics(
         mse=mse,
@@ -139,6 +148,7 @@ class AccuracyValidator:
         onnx_model_or_path: Union[str, Path, onnx.ModelProto],
         pytorch_model: nn.Module,
         tolerance: float = 1.0,
+        atol: float | None = None,
         device: str = "cpu",
     ):
         """
@@ -148,9 +158,12 @@ class AccuracyValidator:
             onnx_model_or_path: ONNX model path or loaded ModelProto.
             pytorch_model: Converted PyTorch model.
             tolerance: Maximum allowed relative error (percentage).
+            atol: Optional absolute tolerance — if set, validation passes
+                when *either* relative error <= tolerance OR max_diff <= atol.
             device: Device to run PyTorch model on.
         """
         self.tolerance = tolerance
+        self.atol = atol
         self.device = device
         
         # Load ONNX model
@@ -239,13 +252,13 @@ class AccuracyValidator:
             else:
                 outputs = self.pytorch_model(*torch_inputs)
         
-        # Convert outputs to numpy
+        # Convert outputs to numpy — handle Tensor, tuple, or list
         if isinstance(outputs, torch.Tensor):
             outputs = [outputs]
-        elif isinstance(outputs, tuple):
+        elif isinstance(outputs, (tuple, list)):
             outputs = list(outputs)
-            
-        return [o.cpu().numpy() for o in outputs]
+
+        return [o.cpu().numpy() if isinstance(o, torch.Tensor) else np.asarray(o) for o in outputs]
     
     def validate(
         self,
@@ -284,6 +297,7 @@ class AccuracyValidator:
                 onnx_outputs[0],
                 torch_outputs[0],
                 tolerance=self.tolerance,
+                atol=self.atol,
             )
             all_metrics.append(metrics)
             

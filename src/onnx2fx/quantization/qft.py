@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.ao.quantization import (
     get_default_qat_qconfig,
-    prepare_qat,
+    prepare_qat as torch_prepare_qat,
     convert,
     QConfigMapping,
 )
@@ -81,7 +81,7 @@ class QFTEncodings:
         logger.info(f"Saved QFT encodings to {path}")
 
 
-def prepare_qat(
+def prepare_model_for_qat(
     model: nn.Module,
     config: QFTConfig | None = None,
     example_input: torch.Tensor | None = None,
@@ -126,7 +126,7 @@ def prepare_qat(
     
     # Fallback to eager mode
     model.qconfig = config.get_qat_qconfig()
-    prepared_model = prepare_qat(model, inplace=False)
+    prepared_model = torch_prepare_qat(model)
     
     return prepared_model
 
@@ -258,13 +258,17 @@ def export_qft_encodings(
     for name, module in quantized_model.named_modules():
         layer_enc = {}
         
-        if hasattr(module, 'weight') and hasattr(module.weight, 'q_scale'):
+        if hasattr(module, 'weight'):
             try:
-                layer_enc['weight'] = {
-                    'scale': float(module.weight().q_scale()),
-                    'zero_point': int(module.weight().q_zero_point()),
-                    'dtype': str(module.weight().dtype),
-                }
+                w = module.weight
+                if callable(w):
+                    w = w()
+                if hasattr(w, 'q_scale'):
+                    layer_enc['weight'] = {
+                        'scale': float(w.q_scale()),
+                        'zero_point': int(w.q_zero_point()),
+                        'dtype': str(w.dtype),
+                    }
             except Exception:
                 pass
         
@@ -369,7 +373,7 @@ def run_qft_pipeline(
         example_input = example_batch[:1]
     
     # Step 1: Prepare for QAT
-    prepared = prepare_qat(model, config, example_input)
+    prepared = prepare_model_for_qat(model, config, example_input)
     
     # Step 2: Fine-tune
     trained, metrics = train_qft(

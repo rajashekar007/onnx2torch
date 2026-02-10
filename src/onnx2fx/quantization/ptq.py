@@ -203,13 +203,21 @@ def export_encodings(
     for name, module in quantized_model.named_modules():
         layer_enc = {}
         
-        # Check for weight quantization
-        if hasattr(module, 'weight') and hasattr(module.weight, 'q_scale'):
-            layer_enc['weight'] = {
-                'scale': float(module.weight().q_scale()),
-                'zero_point': int(module.weight().q_zero_point()),
-                'dtype': str(module.weight().dtype),
-            }
+        # Check for weight quantization — handle both native quantized
+        # modules (weight is callable) and onnx2torch modules (weight
+        # is a plain Parameter)
+        try:
+            w = module.weight
+            if callable(w):
+                w = w()
+            if hasattr(w, 'q_scale'):
+                layer_enc['weight'] = {
+                    'scale': float(w.q_scale()),
+                    'zero_point': int(w.q_zero_point()),
+                    'dtype': str(w.dtype),
+                }
+        except Exception:
+            pass
         
         # Check for activation quantization (scale/zero_point attributes)
         if hasattr(module, 'scale') and hasattr(module, 'zero_point'):

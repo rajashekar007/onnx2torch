@@ -18,10 +18,53 @@ class FxTraceError(Exception):
     pass
 
 
+def _collect_onnx2torch_leaf_types(model: nn.Module) -> set[type]:
+    """Collect all onnx2torch module types used in a model.
+
+    These modules contain dynamic control flow in their ``forward()``
+    that breaks ``torch.fx.symbolic_trace``.  Treating them as leaf
+    modules lets FX trace around them.
+    """
+    leaf_types: set[type] = set()
+    for _name, mod in model.named_modules():
+        if "onnx2torch" in type(mod).__module__:
+            leaf_types.add(type(mod))
+    return leaf_types
+
+
+class Onnx2TorchTracer(fx.Tracer):
+    """FX Tracer that treats onnx2torch converter modules as leaf nodes.
+
+    onnx2torch generates custom ``nn.Module`` subclasses (e.g.
+    ``OnnxResize``, ``OnnxSlice``, ``OnnxConstant``) whose ``forward``
+    methods use Python control flow on tensor values, type checks, and
+    other patterns that ``symbolic_trace`` cannot handle.
+
+    This tracer automatically detects all such module types in the model
+    and marks them as leaves so that FX builds graph edges *around* them
+    rather than trying to inline their implementations.
+    """
+
+    def __init__(self, model: nn.Module | None = None, extra_leaf_types: set[type] | None = None):
+        super().__init__()
+        self._leaf_types: set[type] = set(extra_leaf_types or set())
+        if model is not None:
+            self._leaf_types |= _collect_onnx2torch_leaf_types(model)
+
+    def is_leaf_module(self, m: nn.Module, module_qualified_name: str) -> bool:
+        if type(m) in self._leaf_types:
+            return True
+        # Also treat any onnx2torch module as leaf even if not pre-collected
+        if "onnx2torch" in type(m).__module__:
+            return True
+        return super().is_leaf_module(m, module_qualified_name)
+
+
 def trace_model(
     model: nn.Module,
     concrete_args: dict[str, Any] | None = None,
     tracer_class: type[fx.Tracer] | None = None,
+    auto_leaf: bool = True,
 ) -> fx.GraphModule:
     """
     Trace a PyTorch model using FX symbolic trace.
@@ -30,6 +73,8 @@ def trace_model(
         model: PyTorch model to trace.
         concrete_args: Optional dict of concrete values for some arguments.
         tracer_class: Optional custom Tracer class to use.
+        auto_leaf: If True and no tracer_class is given, automatically use
+            ``Onnx2TorchTracer`` when the model contains onnx2torch modules.
         
     Returns:
         FX GraphModule containing the traced graph.
@@ -44,6 +89,11 @@ def trace_model(
             tracer = tracer_class()
             graph = tracer.trace(model, concrete_args)
             traced = fx.GraphModule(model, graph)
+        elif auto_leaf and _collect_onnx2torch_leaf_types(model):
+            tracer = Onnx2TorchTracer(model)
+            graph = tracer.trace(model, concrete_args)
+            traced = fx.GraphModule(model, graph)
+            logger.info("FX trace successful (Onnx2TorchTracer with leaf modules)")
         else:
             traced = fx.symbolic_trace(model, concrete_args)
             

@@ -10,7 +10,7 @@ from onnx2fx.quantization.ptq import (
 )
 from onnx2fx.quantization.qft import (
     QFTConfig,
-    prepare_qat,
+    prepare_model_for_qat,
     train_qft,
     export_qft_encodings,
     export_qft_onnx,
@@ -27,7 +27,7 @@ __all__ = [
     "run_ptq_pipeline",
     # QFT
     "QFTConfig",
-    "prepare_qat",
+    "prepare_model_for_qat",
     "train_qft",
     "export_qft_encodings",
     "export_qft_onnx",
