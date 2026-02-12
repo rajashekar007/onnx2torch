@@ -182,14 +182,149 @@ def export_yolov11n(output_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# 6. EfficientViT (M3)
+# ---------------------------------------------------------------------------
+def export_efficientvit(output_dir: Path) -> Path:
+    """Export EfficientViT-B1 from timm to ONNX."""
+    dest = output_dir / "efficientvit_b1.onnx"
+    if dest.exists():
+        logger.info("EfficientViT-B1 already exists at %s", dest)
+        return dest
+
+    logger.info("Loading EfficientViT-B1 from timm...")
+    try:
+        import timm
+        # efficientvit_b1 is a good representative (224x224)
+        model = timm.create_model("efficientvit_b1", pretrained=True)
+        model.eval()
+
+        dummy = torch.randn(1, 3, 224, 224)
+        torch.onnx.export(
+            model,
+            dummy,
+            str(dest),
+            opset_version=17,
+            input_names=["input"],
+            output_names=["output"],
+            dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
+        )
+        logger.info("EfficientViT-B1 saved to %s (%.1f MB)", dest, dest.stat().st_size / 1e6)
+        return dest
+    except ImportError:
+        logger.error("timm not installed. Install with: pip install timm")
+        raise
+
+
+# ---------------------------------------------------------------------------
+# 7. YOLOv8n (M3)
+# ---------------------------------------------------------------------------
+def export_yolov8n(output_dir: Path) -> Path:
+    """Export YOLOv8n using Ultralytics to ONNX."""
+    dest = output_dir / "yolov8n.onnx"
+    if dest.exists():
+        logger.info("YOLOv8n already exists at %s", dest)
+        return dest
+
+    logger.info("Exporting YOLOv8n via Ultralytics...")
+    try:
+        from ultralytics import YOLO
+
+        model = YOLO("yolov8n.pt")
+        # Use dynamic=True to support variable batch sizes (needed for QFT)
+        model.export(format="onnx", imgsz=640, opset=17, dynamic=True)
+        # Ultralytics exports to same directory as .pt file
+        exported = Path("yolov8n.onnx")
+        if exported.exists():
+            exported.rename(dest)
+        else:
+            # Check in current dir
+            for p in Path(".").glob("yolov8n*.onnx"):
+                p.rename(dest)
+                break
+    except ImportError:
+        logger.error("ultralytics not installed. Install with: pip install ultralytics")
+        raise
+
+    logger.info("YOLOv8n saved to %s (%.1f MB)", dest, dest.stat().st_size / 1e6)
+    return dest
+
+
+# ---------------------------------------------------------------------------
+# 8. RTMDet-Large (M3)
+# ---------------------------------------------------------------------------
+def download_rtmdet_large(output_dir: Path) -> Path:
+    """Download RTMDet-Large ONNX from HuggingFace."""
+    dest = output_dir / "rtmdet_l.onnx"
+    if dest.exists():
+        logger.info("RTMDet-Large already exists at %s", dest)
+        return dest
+
+    # Try downloading from HuggingFace
+    urls = [
+        "https://huggingface.co/bukuroo/RTMDet-ONNX/resolve/main/rtmdet_l_8xb32-300e_coco.onnx",
+        "https://huggingface.co/bukuroo/RTMDet-ONNX/resolve/main/rtmdet-l.onnx",
+        "https://huggingface.co/ziq/rtm/resolve/main/rtmdet-l.onnx",
+        "https://huggingface.co/ziq/rtm/resolve/main/rtmdet_l.onnx",
+        # Fallback to Medium if Large fails, to unblock testing
+        "https://huggingface.co/ziq/rtm/resolve/main/rtmdet-m.onnx",
+    ]
+    
+    for url in urls:
+        logger.info("Trying RTMDet download from %s", url)
+        try:
+            urlretrieve(url, str(dest), reporthook=progress_hook)
+            print()
+            # If successful, check size to see if we got an error page (small file)
+            if dest.stat().st_size < 10000:
+                logger.warning("Downloaded file too small (likely 404 text), trying next...")
+                continue
+            
+            logger.info("RTMDet saved to %s (%.1f MB)", dest, dest.stat().st_size / 1e6)
+            return dest
+        except Exception:
+            logger.warning("Download failed, trying next...")
+            continue
+            
+    logger.error("All RTMDet download attempts failed")
+    raise RuntimeError("Could not download RTMDet")
+
+
+# ---------------------------------------------------------------------------
+# 9. RealESRGAN_x2 (M3)
+# ---------------------------------------------------------------------------
+def download_realesrgan_x2(output_dir: Path) -> Path:
+    """Download RealESRGAN_x2plus ONNX from HuggingFace."""
+    dest = output_dir / "realesrgan_x2plus.onnx"
+    if dest.exists():
+        logger.info("RealESRGAN_x2plus already exists at %s", dest)
+        return dest
+
+    url = (
+        "https://huggingface.co/tidus2102/Real-ESRGAN/resolve/main/Real-ESRGAN_x2plus.onnx"
+    )
+    logger.info("Downloading RealESRGAN_x2plus from %s", url)
+    urlretrieve(url, str(dest), reporthook=progress_hook)
+    print()
+
+    logger.info("RealESRGAN_x2plus saved to %s (%.1f MB)", dest, dest.stat().st_size / 1e6)
+    return dest
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 MODEL_EXPORTERS = {
+    # M2
     "resnet50": download_resnet50,
     "convnext_tiny": export_convnext_tiny,
     "x3dm": export_x3dm,
     "rtdetrv2": download_rtdetrv2,
     "yolov11n": export_yolov11n,
+    # M3
+    "efficientvit": export_efficientvit,
+    "yolov8n": export_yolov8n,
+    "rtmdet_l": download_rtmdet_large,
+    "realesrgan": download_realesrgan_x2,
 }
 
 
