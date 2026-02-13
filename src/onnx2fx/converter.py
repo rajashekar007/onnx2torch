@@ -368,11 +368,27 @@ class OnnxNonMaxSuppression(nn.Module):
                 # ONNX spec says "max_output_boxes_per_class".
                 # Standard impl:
                 if max_k > 0:
-                    # We need to enforce limit per class.
-                    # Re-sort by class? or just count.
-                    # Since we are implementing for RTMDet which usually does this inside, 
-                    # let's try to minimal implementation.
-                    pass 
+                    # Enforce per-class limit
+                    # batched_nms returns indices sorted by score (descending)
+                    # We want to keep top-K per class.
+                    
+                    kept_classes = filtered_class_idxs[keep]
+                    
+                    # Sort by class (stable to preserve score ordering within class)
+                    perm = torch.argsort(kept_classes, stable=True)
+                    sorted_keep = keep[perm]
+                    sorted_classes = kept_classes[perm]
+                    
+                    # identify counts per class
+                    unique_classes, counts = torch.unique_consecutive(sorted_classes, return_counts=True)
+                    
+                    # Vectorized way to keep top-k:
+                    # construct a rank tensor 0..N-1 for each class block
+                    # e.g. [0, 1, 2, 0, 1]
+                    ranks = torch.cat([torch.arange(c, device=boxes.device) for c in counts])
+                    
+                    mask = ranks < max_k
+                    keep = sorted_keep[mask] 
                 
             # Collect results: [batch_index, class_index, box_index]
             # batch_index is constant b
